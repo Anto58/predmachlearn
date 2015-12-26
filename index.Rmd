@@ -1,0 +1,195 @@
+---
+title: "Practical Machine Learning - Project Write-Up"
+author: "Susan Antcliff"
+date: "24 December 2015"
+output: html_document
+---
+
+##  Background
+
+The objective of this project was to use a training data set to develop a model that would predict whether an individual performing a simple barbell exercise was using correct form.
+
+There were five possible outcomes, reflecting various ways of performing the exercise, that needed to be distinguished based on data collected from accelerometers on the belt, arm, dumbbell and glove of six individuals.  Further details on the data are provided [here](http://groupware.les.inf.puc-rio.br/har)
+
+The model developed from the training data was then to be tested on 20 records where the actual outcome was unknown.
+
+##  Preliminaries
+
+Load the various packages needed
+
+```{r}
+library(caret)
+library(randomForest)
+library(gbm)
+
+```
+
+
+##  Data Preparation
+
+The training and testing datasets were downloaded from [link to training data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) and [link to testing data](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv) respectively.
+
+```{r, cache=TRUE}
+train.dat <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+
+
+test.dat <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+
+
+```
+
+The training dataset had `r dim(train.dat)[1]` rows and `r dim(train.dat)[2]` columns.
+
+The testing dataset had `r dim(test.dat)[1]` rows and `r dim(test.dat)[2]` columns.
+
+
+An examination of the datasets showed a large number of variables which had NAs or missing values.  This was notably the case for the testing dataset and therefore indicated that any information for these variables on the training dataset would not be usable.  The new_window variable was also equal to "no" on all twenty of the test dataset observations.  Accordingly, the first step in the data preparation was to remove variables and observations from the training dataset that would not be usable for the test.  Note that anything that was done to the training dataset also needed to be applied to the test dataset.
+
+```{r}
+rem.col <- as.vector(apply(test.dat[1,], 2,is.na))
+train.dat1 <- train.dat[train.dat$new_window=="no", !rem.col]
+test.dat1 <- test.dat[test.dat$new_window=="no", !rem.col]
+```
+
+This removed `r dim(train.dat)[1]-dim(train.dat1)[1]` rows and `r dim(train.dat)[2]-dim(train.dat1)[2]` columns from the training dataset.
+
+The next step was to separate out the output variable from the training dataset and select and scale the numeric predictors.
+
+```{r}
+#    output variable
+y <- train.dat1$classe
+
+#    predictor variables
+x <- scale(train.dat1[,sapply(train.dat1, is.numeric)])
+x.tst <- scale(test.dat1[,sapply(test.dat1, is.numeric)])
+
+```
+
+
+This modified training dataset formed the basis for the subsequent analysis and model fitting.
+
+##  Model Fitting
+
+Since we want to be able to cross validate the model, it was necessary to split the training data set into a subset that could be used for training and a subset to be used for validation.
+
+```{r}
+# Set the seed to ensure reproducibility
+set.seed(123)
+# Divide the dataset in train and validation sets
+inTrain <- createDataPartition(y, p = 3/4, list = FALSE); 
+# Create the training dataset for predictors 
+train_x <- x[inTrain,];
+# Create the validation dataset for predictors
+valid_x <- x[-inTrain,];
+# Create the corresponding outcome vectors
+train_y <- y[inTrain];
+valid_y <- y[-inTrain];
+
+```
+
+There are still a relatively large number of predictor variables even after removing the variables with NAs and I had not real idea how to interpret them.  I therefore used a correlation matrix to remove redundant variables.  As before, the same process must be applied to the testing dataset.
+
+```{r}
+corr.mat <- cor(train_x)
+highCorr <- findCorrelation(corr.mat, 0.70)
+train_x <- train_x[,-highCorr]
+valid_x <- valid_x[,-highCorr]
+x.tst1 <- x.tst[,-highCorr]
+
+```
+The first four variables on the predictor dataset were descriptors (row number, time stamps and windown number) that should not be used for prediction.  The final variable on test dataset was the problem id and this also needed to be removed.  These variables were removed to provide a clean dataset as input for the modelling process.
+
+```{r}
+train_x1 <- train_x[,-c(1:4)]
+valid_x1 <- valid_x[,-c(1:4)]
+x.tst <- x.tst1[,c(5:33)]
+
+```
+
+I looked at three prediction models: random forest, generalised boosted regression and linear discriminant analysis as well as a stacked model combining the results of these three outcomes.
+
+#### Random Forest
+
+```{r, cache=TRUE}
+fitrf<- train(train_x1, train_y ,method="rf")
+predrf.val <- predict(fitrf, valid_x1)
+confusionMatrix(predrf.val, valid_y)[2]
+confusionMatrix(predrf.val, valid_y)$overall[1]
+```
+
+#### Generalised boosted regression
+```{r, cache=TRUE}
+fitgbm <- train(train_x1, train_y ,method="gbm", verbose=FALSE)
+predgbm.val <- predict(fitgbm, valid_x1)
+confusionMatrix(predgbm.val, valid_y)[2]
+confusionMatrix(predgbm.val, valid_y)$overall[1]
+
+```
+
+
+### Linear discriminant analysis
+```{r, cache=TRUE}
+fitlda <- train(train_x1, train_y ,method="lda")
+predlda.val <- predict(fitlda, valid_x1)
+confusionMatrix(predlda.val, valid_y)[2]
+confusionMatrix(predlda.val, valid_y)$overall[1]
+```
+
+
+### Stacked model
+
+Given that the random forest had the best results, use random forest to fit the stacked model.
+
+```{r, cache=TRUE}
+#  Create the input variables for the stacked model
+predrf <- predict(fitrf, train_x1)
+predgbm <- predict(fitgbm, train_x1)
+predlda <- predict(fitlda, train_x1)
+newdata.trn <- cbind(predrf, predgbm, predlda)
+#  Fit the stacked model
+stackedfit <- train(newdata.trn, train_y, method="rf")
+#  Test the stacked model on the validation data     
+newdata.val <- cbind(predrf=predrf.val, predgbm=predgbm.val, predlda=predlda.val)
+valid.pred <- predict(stackedfit, newdata.val)
+confusionMatrix(valid.pred, valid_y)[2]
+confusionMatrix(valid.pred, valid_y)$overall[[1]]
+
+```
+The stacked model performed no better than the original random forest model.  This is perhaps not surprising given that the other two models had considerably poorer accuracy than the random forest (I would welcome any comments from peer reviewers on how the gbm model in particular could have been improved as the accuracy seemed surprisingly bad.)
+
+##  Expected Out of Sample Error
+
+To estimate the expected out of sample error on the test set of 20 observations, we can use two approaches.  The first is to apply the overall accuracy level to find the probability of a different number of errors.  
+
+```{r}
+prob0 <- confusionMatrix(valid.pred, valid_y)$overall[[1]]^20
+prob1 <- confusionMatrix(valid.pred, valid_y)$overall[[1]]^19*(1-confusionMatrix(valid.pred, valid_y)$overall[[1]])*20
+prob2plus <- 1-prob0-prob1
+```
+
+Note that the overall accuracy on the stacked model was `r confusionMatrix(valid.pred, valid_y)$overall[[1]]`, so the probability of no errors is `r prob0`.  The probability of one error is `r prob1` and the probablity of 2 or more errors is `r prob2plus`.  Thus the expected number of errors is roughly `r prob1+2*prob2plus`.
+
+We can also make an estimate of the out of sample error by repeatedly randomly sampling 20 observations from a vector which compares the predicted and actual outcomes for the validation dataset.
+
+```{r}
+val.comp <- valid_y!= valid.pred
+smp <- replicate(1000,sum(sample(val.comp,20, replace=TRUE)))
+
+```
+
+This suggests that we would expect to see no errors `r sum(smp==0)/10`% of the time, one error `r sum(smp==1)/10`% of the time and 2 or more errors `r sum(smp>1)/10`% of the time.
+
+##   Predicting on the Test Dataset 
+
+The following code implements the prediction for the test dataset for all four models.  Note that the stacked model again gives the same results as the random forest model.
+
+```{r}
+predrf.tst <- predict(fitrf, x.tst)
+predgbm.tst <- predict(fitgbm, x.tst)
+predlda.tst <- predict(fitlda, x.tst)
+newdata.tst <- cbind(predrf=predrf.tst, predgbm=predgbm.tst, predlda=predlda.tst)
+test.pred <- predict(stackedfit, newdata.tst)
+sum(predrf.tst==test.pred)
+```
+
+Submitting the predicted outcomes resulted in one error, which, a priori, would have been expected to be less likely than no errors, so was a little disappoointing.
